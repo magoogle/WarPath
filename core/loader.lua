@@ -8,7 +8,7 @@
 --    `<plugin>/cache/<key>.json`
 -- and the HTTP fetcher is
 --    `<plugin>/bin/fetch_zone.py`.
--- The fetcher runs as a detached pythonw.exe process (`start "" /B pythonw ...`)
+-- The fetcher runs in a detached cmd window (`start "" /B cmd /c ...`)
 -- so it never blocks the game thread.
 --
 -- Lookup order on each load(key):
@@ -160,19 +160,33 @@ local function spawn_fetch(key)
 
     ensure_dir(cache_dir)
 
-    -- pythonw.exe (Windows GUI subsystem) instead of python.exe so the
-    -- fetcher process has NO console window allocated -- no CMD flash
-    -- on cache-miss spawns.  Was previously 'start "" /B cmd /c python';
-    -- the cmd /c part was the source of "I keep seeing CMD pop up" --
-    -- /B doesn't suppress the kernel-allocated console for cmd.exe
-    -- itself, only for whatever cmd launches.  Drop cmd /c entirely
-    -- and invoke pythonw directly through start /B.
-    local python  = (cfg and cfg.python) or 'python'
-    local pythonw = python:gsub('python%.exe$', 'pythonw.exe'):gsub('python$', 'pythonw')
-    local cmd = string.format(
-        'start "" /B %s "%s" --server "%s" --key "%s" --cache-dir "%s"',
-        pythonw, fetcher, server, key, cache_dir)
-    os.execute(cmd)
+    -- File-IPC instead of os.execute.  Lua's os.execute on Windows
+    -- ALWAYS allocates a cmd.exe child to interpret the command line,
+    -- even when the command itself is just 'start "" /B pythonw ...' --
+    -- the parent cmd.exe flashes a console window briefly before
+    -- exiting.  Even after switching to pythonw, the wrapping cmd
+    -- still flashes -- /B suppresses console for whatever cmd
+    -- LAUNCHES, but not for cmd.exe itself.
+    --
+    -- Solution: don't spawn anything from Lua.  Append a one-line
+    -- "please fetch this zone" request to a queue file the long-lived
+    -- uploader watcher reads each cycle.  Zero process spawns from
+    -- Lua = zero CMD flashes regardless of how many cache misses.
+    --
+    -- The watcher is expected to be running already (started by the
+    -- scheduled task at logon -- install.ps1 registers the task).  If
+    -- it isn't, requests just queue up until something starts reading.
+    local queue_path = (cfg and cfg.sidecar_dir) and (cfg.sidecar_dir .. '\\fetch_queue.txt') or nil
+    if not queue_path then return false, 'no_sidecar_dir' end
+
+    -- Simple newline-delimited format: 'fetch_zone:<key>'.  Unknown
+    -- line prefixes are no-ops in the watcher so we can extend later
+    -- (e.g. 'refresh_all', 'fetch_actor_index') without breaking older
+    -- watchers.
+    local f = io.open(queue_path, 'a')
+    if not f then return false, 'queue_open_failed' end
+    f:write(string.format('fetch_zone:%s\n', key))
+    f:close()
     return true
 end
 
@@ -300,33 +314,32 @@ local function fetch_all_path()
 end
 
 local function spawn_fetch_all()
+    -- File-IPC: queue a 'refresh_all' command for the long-lived
+    -- uploader watcher to handle on its next cycle.  Zero process
+    -- spawns from Lua = zero CMD flashes on /reload.  Watcher
+    -- discovers the request, calls fetch_all.py itself, writes results
+    -- into cache/.  See spawn_fetch() above for the same pattern.
     local cfg = uploader_cfg()
-    local server = cfg and cfg.server_url
-    if not server or server == '' then
-        console.print('[StaticPather] bulk fetch skipped: no server_url configured')
+    if not cfg then
+        console.print('[StaticPather] bulk fetch skipped: no uploader config')
         return
     end
-    local cache_dir = plugin_cache_dir()
-    if not cache_dir then return end
-    ensure_dir(cache_dir)
-
-    local fetcher = fetch_all_path()
-    if not fetcher or not file_exists(fetcher) then
-        console.print('[StaticPather] bulk fetch skipped: fetch_all.py not found')
+    local queue_path = cfg.sidecar_dir and (cfg.sidecar_dir .. '\\fetch_queue.txt') or nil
+    if not queue_path then
+        console.print('[StaticPather] bulk fetch skipped: no sidecar_dir')
         return
     end
-
-    -- pythonw + start /B = no console window flash on /reload.  Falls
-    -- back to plain python if the cfg.python path isn't a pythonw-
-    -- swappable form.
-    local python = (cfg and cfg.python) or 'python'
-    local pythonw = python:gsub('python%.exe$', 'pythonw.exe'):gsub('python$', 'pythonw')
-    local cmd = string.format(
-        'start "" /B %s "%s" --server "%s" --cache-dir "%s" > nul 2>&1',
-        pythonw, fetcher, server, cache_dir)
-    os.execute(cmd)
-    console.print('[StaticPather] bulk fetch spawned (background)')
+    local f = io.open(queue_path, 'a')
+    if not f then
+        console.print('[StaticPather] bulk fetch skipped: queue write failed')
+        return
+    end
+    f:write('refresh_all\n')
+    f:close()
+    console.print('[StaticPather] bulk fetch queued for the uploader watcher')
+    return
 end
+
 
 -- Fire once when the module loads.  Idempotent on re-loads -- the per-
 -- zone IMS handling means unchanged zones return 304 with no body.
