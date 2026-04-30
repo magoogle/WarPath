@@ -8,7 +8,7 @@
 --    `<plugin>/cache/<key>.json`
 -- and the HTTP fetcher is
 --    `<plugin>/bin/fetch_zone.py`.
--- The fetcher runs in a detached cmd window (`start "" /B cmd /c ...`)
+-- The fetcher runs as a detached pythonw.exe process (`start "" /B pythonw ...`)
 -- so it never blocks the game thread.
 --
 -- Lookup order on each load(key):
@@ -160,14 +160,18 @@ local function spawn_fetch(key)
 
     ensure_dir(cache_dir)
 
-    local python = (cfg and cfg.python) or 'python'
-    -- start "" /B   = no new console window, returns immediately so cmd.exe
-    --                 exits and os.execute() unblocks within ~ms.
-    -- > nul 2>&1    = drop fetcher stdout/stderr; success is observable via
-    --                 the file appearing on disk.
+    -- pythonw.exe (Windows GUI subsystem) instead of python.exe so the
+    -- fetcher process has NO console window allocated -- no CMD flash
+    -- on cache-miss spawns.  Was previously 'start "" /B cmd /c python';
+    -- the cmd /c part was the source of "I keep seeing CMD pop up" --
+    -- /B doesn't suppress the kernel-allocated console for cmd.exe
+    -- itself, only for whatever cmd launches.  Drop cmd /c entirely
+    -- and invoke pythonw directly through start /B.
+    local python  = (cfg and cfg.python) or 'python'
+    local pythonw = python:gsub('python%.exe$', 'pythonw.exe'):gsub('python$', 'pythonw')
     local cmd = string.format(
-        'start "" /B cmd /c %s "%s" --server "%s" --key "%s" --cache-dir "%s" > nul 2>&1',
-        python, fetcher, server, key, cache_dir)
+        'start "" /B %s "%s" --server "%s" --key "%s" --cache-dir "%s"',
+        pythonw, fetcher, server, key, cache_dir)
     os.execute(cmd)
     return true
 end
