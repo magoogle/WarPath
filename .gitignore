@@ -1,0 +1,14 @@
+# Auto-populated at runtime by bin/fetch_all.py.  Each zone JSON is
+# pulled fresh from the WarMap server on Lua reload, so checking them
+# in would just create stale-on-arrival noise.
+cache/
+*.json.tmp
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS / editor noise
+*.swp
+.DS_Store
+Thumbs.db

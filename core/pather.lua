@@ -1,0 +1,226 @@
+-- ---------------------------------------------------------------------------
+-- StaticPather public-facing API.
+--
+-- Loads the merged WarMap data for the player's current zone (curated actor
+-- catalog) and exposes a small, stable surface to consumers:
+--
+--   is_zone_supported()              -> bool
+--   get_status()                     -> { key, key_type, cells, actors, ... }
+--   find_path(start, goal, opts?)    -> vec3[] | nil, stats
+--   path_to(goal, opts?)             -> vec3[] | nil, stats     (start = player)
+--   get_actors(kind?)                -> array of actor entries
+--   nearest_actor(kind, pos, skin?)  -> actor entry | nil
+--   nearest_affordable_chest(pos, cinders?, kind?) -> actor entry | nil
+--   reload()                         -> drops cache
+--
+-- Pathfinding is delegated to the QQT host's `world:calculate_path()` --
+-- our own A*/grid is gone.  The actor catalog remains the high-value
+-- crowdsourced data this plugin exists to serve.
+-- ---------------------------------------------------------------------------
+
+local loader      = require 'core.loader'
+local host_pather = require 'core.host_pather'
+
+local M = {}
+
+-- Loaded state for the current key. nil when no data exists for current zone.
+local state = nil
+local last_key = nil
+
+-- ---------------------------------------------------------------------------
+-- Internal: lazy-load curated data for the current zone/pit-world.
+-- Returns true if data is loaded, false otherwise.
+-- ---------------------------------------------------------------------------
+local function ensure_loaded()
+    local key, key_type, ctx = loader.compute_key()
+    if not key then return false end
+
+    if last_key == key and state then return true end
+
+    last_key = key
+    state = nil
+
+    local result = loader.load(key)
+    if not result then return false end
+
+    -- Cell count comes from the merged data for the status display only;
+    -- we don't use it for pathfinding any more.
+    local cell_count = 0
+    local floors = (result.data.grid and result.data.grid.floors) or {}
+    for _, f in pairs(floors) do
+        cell_count = cell_count + #f
+    end
+
+    state = {
+        key       = key,
+        key_type  = key_type,
+        ctx       = ctx,
+        data      = result.data,
+        path      = result.source_path,
+        actors    = result.data.actors or {},
+        cells     = cell_count,
+        loaded_at = (get_time_since_inject and get_time_since_inject()) or 0,
+    }
+    console.print(string.format(
+        '[StaticPather] loaded %s: cells=%d actors=%d (%s)',
+        key, cell_count, #state.actors,
+        result.data.saturated and 'SATURATED' or 'in-progress'))
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Public: is the current zone supported by curated data?
+-- ---------------------------------------------------------------------------
+M.is_zone_supported = function ()
+    return ensure_loaded() and state ~= nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Pit-only stub kept for backwards-compat with main.lua.  We no longer
+-- maintain a per-floor grid since the host pathfinder operates on the
+-- live world, so the floor index is informational only.
+-- ---------------------------------------------------------------------------
+M.set_pit_floor = function (_) end
+
+-- ---------------------------------------------------------------------------
+-- Public: status dictionary for GUI / probes.
+-- ---------------------------------------------------------------------------
+M.get_status = function ()
+    if not ensure_loaded() or not state then
+        local key, _ = loader.compute_key()
+        return {
+            supported   = false,
+            current_key = key,
+            host_pather = host_pather.has_pathfinder(),
+        }
+    end
+    return {
+        supported   = true,
+        key         = state.key,
+        key_type    = state.key_type,
+        path        = state.path,
+        cells       = state.cells,
+        actors      = #state.actors,
+        saturated   = state.data.saturated and true or false,
+        sessions    = state.data.sessions_merged,
+        host_pather = host_pather.has_pathfinder(),
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- Public: find a path from start_pos to goal_pos using the host pathfinder.
+-- Returns:
+--   path  : list of vec3 waypoints, or nil
+--   stats : { reason } | { backend = 'host', n = N }
+-- ---------------------------------------------------------------------------
+M.find_path = function (start_pos, goal_pos, _opts)
+    if not goal_pos  then return nil, { reason = 'bad_input' } end
+    if not start_pos then return nil, { reason = 'bad_input' } end
+    local path, err = host_pather.path_to(goal_pos, start_pos)
+    if not path then return nil, { reason = err or 'unreachable' } end
+    return path, { backend = 'host', n = #path }
+end
+
+-- ---------------------------------------------------------------------------
+-- Public: convenience -- path from the player's current position.
+-- ---------------------------------------------------------------------------
+M.path_to = function (goal_pos, _opts)
+    if not goal_pos then return nil, { reason = 'bad_input' } end
+    local path, err = host_pather.path_to(goal_pos)
+    if not path then return nil, { reason = err or 'unreachable' } end
+    return path, { backend = 'host', n = #path }
+end
+
+-- ---------------------------------------------------------------------------
+-- Public: list curated actors. Optional kind filter.
+-- ---------------------------------------------------------------------------
+M.get_actors = function (kind)
+    if not ensure_loaded() or not state then return {} end
+    if not kind then return state.actors end
+    local out = {}
+    for _, a in ipairs(state.actors) do
+        if a.kind == kind then out[#out + 1] = a end
+    end
+    return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Public: find the actor of a given kind nearest to pos. Optional skin
+-- filter (exact or substring match).
+-- ---------------------------------------------------------------------------
+M.nearest_actor = function (kind, pos, skin)
+    if not ensure_loaded() or not state then return nil end
+    local px = (pos.x and pos:x()) or pos[1] or 0
+    local py = (pos.y and pos:y()) or pos[2] or 0
+    local best, best_d2 = nil, math.huge
+    for _, a in ipairs(state.actors) do
+        if (not kind or a.kind == kind)
+           and (not skin or a.skin == skin or a.skin:find(skin, 1, true))
+        then
+            local dx, dy = a.x - px, a.y - py
+            local d2 = dx * dx + dy * dy
+            if d2 < best_d2 then
+                best, best_d2 = a, d2
+            end
+        end
+    end
+    return best
+end
+
+-- ---------------------------------------------------------------------------
+-- Public: helltide-aware "find nearest affordable chest".
+--
+-- Given the player's current cinder count, returns the curated chest
+-- entry that is:
+--   1. Of the requested kind (chest_helltide_random/_silent/_targeted)
+--      or any chest if kind == nil.
+--   2. Affordable at the given cinder count (or any if cinders == nil).
+--   3. Closest to from_pos.
+-- ---------------------------------------------------------------------------
+local CHEST_COST_DEFAULT = {
+    chest_helltide_random   = 75,
+    chest_helltide_silent   = 0,    -- key required, not cinders
+    chest_helltide_targeted = 250,  -- conservative
+    chest                   = 75,
+}
+
+local function default_cost_for(kind)
+    return CHEST_COST_DEFAULT[kind] or 75
+end
+
+M.nearest_affordable_chest = function (from_pos, cinders, kind_filter)
+    if not ensure_loaded() or not state then return nil end
+    local px = (from_pos.x and from_pos:x()) or from_pos[1] or 0
+    local py = (from_pos.y and from_pos:y()) or from_pos[2] or 0
+    local best, best_d2 = nil, math.huge
+    for _, a in ipairs(state.actors) do
+        local k = a.kind
+        local is_chest = k == 'chest_helltide_random'
+                      or k == 'chest_helltide_silent'
+                      or k == 'chest_helltide_targeted'
+                      or k == 'chest'
+        if is_chest and (not kind_filter or k == kind_filter) then
+            local cost = default_cost_for(k)
+            local affordable = (cinders == nil) or (cinders >= cost)
+            if affordable then
+                local dx, dy = a.x - px, a.y - py
+                local d2 = dx * dx + dy * dy
+                if d2 < best_d2 then
+                    best, best_d2 = a, d2
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- ---------------------------------------------------------------------------
+-- Public: drop the in-memory cache. Next API call re-reads from disk.
+-- Useful after the merger writes fresh data.
+-- ---------------------------------------------------------------------------
+M.reload = function ()
+    state = nil
+    last_key = nil
+end
+
+return M
