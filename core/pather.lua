@@ -20,6 +20,7 @@
 
 local loader      = require 'core.loader'
 local host_pather = require 'core.host_pather'
+local centerline  = require 'core.centerline'
 
 local M = {}
 
@@ -51,6 +52,21 @@ local function ensure_loaded()
         cell_count = cell_count + #f
     end
 
+    -- Build the wall-distance map for centerline path smoothing.
+    -- We flatten across all floors -- in practice the player is on
+    -- one floor at a time so cross-floor cells don't influence the
+    -- per-step penalty noticeably.  Cheap (linear in cell count)
+    -- and only runs on zone load.
+    local wall_dist = nil
+    local cell_res  = (result.data.grid and result.data.grid.resolution) or 0.5
+    if cell_count > 0 then
+        local flat = {}
+        for _, f in pairs(floors) do
+            for i = 1, #f do flat[#flat + 1] = f[i] end
+        end
+        wall_dist = centerline.build_wall_dist(flat)
+    end
+
     state = {
         key       = key,
         key_type  = key_type,
@@ -59,11 +75,14 @@ local function ensure_loaded()
         path      = result.source_path,
         actors    = result.data.actors or {},
         cells     = cell_count,
+        wall_dist = wall_dist,
+        cell_res  = cell_res,
         loaded_at = (get_time_since_inject and get_time_since_inject()) or 0,
     }
     console.print(string.format(
-        '[StaticPather] loaded %s: cells=%d actors=%d (%s)',
+        '[StaticPather] loaded %s: cells=%d actors=%d centerline=%s (%s)',
         key, cell_count, #state.actors,
+        wall_dist and 'on' or 'off',
         result.data.saturated and 'SATURATED' or 'in-progress'))
     return true
 end
@@ -113,22 +132,42 @@ end
 --   path  : list of vec3 waypoints, or nil
 --   stats : { reason } | { backend = 'host', n = N }
 -- ---------------------------------------------------------------------------
-M.find_path = function (start_pos, goal_pos, _opts)
+-- ---------------------------------------------------------------------------
+-- Centerline-smooth a host-returned path using the cached wall-distance
+-- map.  Cheap O(N * search_radius^2) where N is path length; smoothing
+-- a typical 30-waypoint path is under a millisecond.
+--
+-- opts.smooth = false disables this for callers that want the raw host
+-- output (e.g. exit-precision navigation where hugging the wall is
+-- actually desired -- you're trying to step ONTO a portal switch).
+-- ---------------------------------------------------------------------------
+local function maybe_smooth(path, opts)
+    if not path or #path < 3 then return path end
+    if opts and opts.smooth == false then return path end
+    if not state or not state.wall_dist then return path end
+    return centerline.smooth_path(path, state.wall_dist, state.cell_res, 3)
+end
+
+M.find_path = function (start_pos, goal_pos, opts)
     if not goal_pos  then return nil, { reason = 'bad_input' } end
     if not start_pos then return nil, { reason = 'bad_input' } end
+    ensure_loaded()    -- populate state.wall_dist if not yet
     local path, err = host_pather.path_to(goal_pos, start_pos)
     if not path then return nil, { reason = err or 'unreachable' } end
-    return path, { backend = 'host', n = #path }
+    path = maybe_smooth(path, opts)
+    return path, { backend = 'host_centerline', n = #path }
 end
 
 -- ---------------------------------------------------------------------------
 -- Public: convenience -- path from the player's current position.
 -- ---------------------------------------------------------------------------
-M.path_to = function (goal_pos, _opts)
+M.path_to = function (goal_pos, opts)
     if not goal_pos then return nil, { reason = 'bad_input' } end
+    ensure_loaded()
     local path, err = host_pather.path_to(goal_pos)
     if not path then return nil, { reason = err or 'unreachable' } end
-    return path, { backend = 'host', n = #path }
+    path = maybe_smooth(path, opts)
+    return path, { backend = 'host_centerline', n = #path }
 end
 
 -- ---------------------------------------------------------------------------
