@@ -213,25 +213,72 @@ end
 -- Candidate path list (lookup order documented at top of file)
 -- ---------------------------------------------------------------------------
 
+-- Candidate paths.  Within each directory we list the slim "meta"
+-- variant FIRST and the full file second.  Meta files don't carry
+-- the per-floor cell arrays (which dominate parse time on big zones
+-- -- ~500ms in pure Lua for a 12 MB Hawe_Verge), so loading the
+-- meta gives sub-30ms zone-change parse times.  WarPath lazy-loads
+-- the full file only when wall-distance smoothing is actually
+-- requested (see core/pather.lua's ensure_wall_dist).
 local function candidate_paths(key)
     local out = {}
-    -- 1. Plugin's own cache (primary)
-    local own = plugin_cache_path(key)
-    if own then out[#out + 1] = own end
-    -- 2. Uploader's pulled_zones (incidental fallback)
+    local own_dir = plugin_cache_dir()
+    if own_dir then
+        out[#out + 1] = own_dir .. '\\' .. key .. '.meta.json'
+        out[#out + 1] = own_dir .. '\\' .. key .. '.json'
+    end
+    local cfg = uploader_cfg()
+    if cfg and cfg.data_dir and cfg.data_dir ~= '' then
+        out[#out + 1] = cfg.data_dir .. '\\' .. key .. '.meta.json'
+        out[#out + 1] = cfg.data_dir .. '\\' .. key .. '.json'
+    end
+    local scripts = get_scripts_root()
+    if scripts then
+        local repo = scripts:gsub('scripts$', '')
+        out[#out + 1] = repo .. 'WarMap\\data\\zones\\' .. key .. '.meta.json'
+        out[#out + 1] = repo .. 'WarMap\\data\\zones\\' .. key .. '.json'
+        out[#out + 1] = scripts .. '\\WarMapData\\zones\\' .. key .. '.meta.json'
+        out[#out + 1] = scripts .. '\\WarMapData\\zones\\' .. key .. '.json'
+    end
+    return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Lazy cells loader.  Used by core/pather.lua's ensure_wall_dist when
+-- it actually needs the per-floor cell arrays.  Searches the same
+-- candidate dirs as candidate_paths but ONLY looks for the FULL
+-- (non-.meta) JSON file.  Returns the parsed grid.floors table or
+-- nil when no full file exists locally.
+-- ---------------------------------------------------------------------------
+local function full_file_paths(key)
+    local out = {}
+    local own_dir = plugin_cache_dir()
+    if own_dir then out[#out + 1] = own_dir .. '\\' .. key .. '.json' end
     local cfg = uploader_cfg()
     if cfg and cfg.data_dir and cfg.data_dir ~= '' then
         out[#out + 1] = cfg.data_dir .. '\\' .. key .. '.json'
     end
-    -- 3 + 4. Dev fallbacks
     local scripts = get_scripts_root()
     if scripts then
-        local sibling = scripts:gsub('scripts$', '') .. 'WarMap\\data\\zones\\' .. key .. '.json'
-        local sidecar = scripts .. '\\WarMapData\\zones\\' .. key .. '.json'
-        out[#out + 1] = sibling
-        out[#out + 1] = sidecar
+        local repo = scripts:gsub('scripts$', '')
+        out[#out + 1] = repo .. 'WarMap\\data\\zones\\' .. key .. '.json'
+        out[#out + 1] = scripts .. '\\WarMapData\\zones\\' .. key .. '.json'
     end
     return out
+end
+
+M.load_full_floors = function (key)
+    if not key or key == '' then return nil end
+    for _, p in ipairs(full_file_paths(key)) do
+        local content = read_file(p)
+        if content then
+            local data, err = json.decode(content)
+            if data and data.grid and data.grid.floors then
+                return data.grid.floors
+            end
+        end
+    end
+    return nil
 end
 
 -- ---------------------------------------------------------------------------

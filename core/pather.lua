@@ -44,12 +44,24 @@ local function ensure_loaded()
     local result = loader.load(key)
     if not result then return false end
 
-    -- Cell count comes from the merged data for the status display only;
-    -- we don't use it for pathfinding any more.
-    local cell_count = 0
+    -- Cell count for the status display.  Two paths:
+    --   1. Full file -- iterate floors[fid] and sum #cells (legacy /
+    --      old deploys with no .meta variant).
+    --   2. Meta file -- floors are stubs with no cells, but
+    --      floors_meta[fid].cell_count carries the count for the
+    --      status display.  Without this branch the meta path would
+    --      read cells=0 for every zone.
     local floors = (result.data.grid and result.data.grid.floors) or {}
-    for _, f in pairs(floors) do
-        cell_count = cell_count + #f
+    local cell_count = 0
+    if result.data.cells_omitted then
+        local fm = (result.data.grid and result.data.grid.floors_meta) or {}
+        for _, entry in pairs(fm) do
+            cell_count = cell_count + (entry.cell_count or 0)
+        end
+    else
+        for _, f in pairs(floors) do
+            cell_count = cell_count + #f
+        end
     end
 
     -- Cell resolution + the floors table get stashed for the wall_dist
@@ -96,9 +108,34 @@ local function ensure_wall_dist()
         return state.wall_dist ~= nil
     end
     state.wall_dist_tried = true
+
+    -- The fast load path uses the slim *.meta.json file which omits
+    -- per-floor cell arrays (cells_omitted=true on the parsed table).
+    -- For wall_dist we need the cells, so lazy-pull them from the
+    -- full-file JSON now -- the full file's parse cost (~500ms on
+    -- the biggest zones) is paid only here, the first time someone
+    -- actually asks for path smoothing in this zone.
+    local floors = state.floors
+    if (not floors) or (next(floors) == nil) or state.data.cells_omitted then
+        local pulled = loader.load_full_floors(state.key)
+        if not pulled then
+            console.print(string.format(
+                '[WarPath] centerline skipped for %s: full-file cells not yet cached',
+                state.key))
+            return false
+        end
+        floors = pulled
+        state.floors = pulled
+        -- Recompute cells count from the freshly-loaded floors so the
+        -- status display lines up with reality.
+        local n = 0
+        for _, f in pairs(pulled) do n = n + #f end
+        state.cells = n
+    end
     if (state.cells or 0) == 0 then return false end
+
     local flat = {}
-    for _, f in pairs(state.floors or {}) do
+    for _, f in pairs(floors) do
         for i = 1, #f do flat[#flat + 1] = f[i] end
     end
     local t0 = (get_time_since_inject and get_time_since_inject()) or 0
