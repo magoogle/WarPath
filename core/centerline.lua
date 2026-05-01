@@ -33,10 +33,40 @@ local ADJ = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} }
 --   dist: { ['cx,cy'] = distance }   -- only walkable cells; others omitted
 -- ---------------------------------------------------------------------------
 M.build_wall_dist = function (cells)
+    -- Two cell formats supported:
+    --   * Server-precomputed nav format: each cell is [cx, cy, dist].
+    --     The server's merger ran the BFS once when it emitted the
+    --     nav file; we just transcribe the values into the
+    --     "cx,cy" -> distance lookup table the rest of WarPath
+    --     consumes.  Free at the plugin level (a single pass over
+    --     the cell array), so big zones don't pay the 1.4-second
+    --     BFS hang on first smooth_path.
+    --
+    --   * Legacy full format: each cell is [cx, cy, walkable_bool,
+    --     conf, total] -- no precomputed distance, falls through to
+    --     the in-Lua BFS below.  Used by older deploys / dev
+    --     sandboxes that don't have the nav variant on disk.
+    local n = #cells
+    if n > 0 then
+        -- Sniff format from the first walkable cell.  In nav format
+        -- cells[i][3] is a numeric distance >= 1.  In full format
+        -- cells[i][3] is a boolean walkable flag.
+        local first = cells[1]
+        if first and type(first[3]) == 'number' and first[3] >= 1 then
+            local dist = {}
+            for i = 1, n do
+                local c = cells[i]
+                dist[c[1] .. ',' .. c[2]] = c[3]
+            end
+            return dist
+        end
+    end
+
+    -- Legacy path: full-format cells, build wall_dist via in-Lua BFS.
     local cell_set = {}
-    for i = 1, #cells do
+    for i = 1, n do
         local c = cells[i]
-        if c[3] then     -- walkable flag
+        if c[3] then     -- walkable flag (boolean here)
             cell_set[c[1] .. ',' .. c[2]] = true
         end
     end
@@ -65,9 +95,9 @@ M.build_wall_dist = function (cells)
     -- on index 1 would be O(N^2).
     local head = 1
     while head <= qn do
-        local n = queue[head]
+        local node = queue[head]
         head = head + 1
-        local cx, cy, d = n[1], n[2], n[3]
+        local cx, cy, d = node[1], node[2], node[3]
         local nd = d + 1
         for i = 1, 4 do
             local nx = cx + ADJ[i][1]

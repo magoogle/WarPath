@@ -294,19 +294,12 @@ M.load_full_floors = function (key)
         if content then
             local data, err = json.decode(content)
             if data and data.grid and data.grid.floors then
-                local is_nav = data.cells_format == 'nav_walkable_only'
-                if is_nav then
-                    -- Cells in nav format are [cx, cy].  Centerline
-                    -- expects 3-tuples ([cx, cy, walkable_bool]) so
-                    -- the c[3] check passes.  Synthesize the third
-                    -- slot in-place.
-                    for _, floor_cells in pairs(data.grid.floors) do
-                        for i = 1, #floor_cells do
-                            local c = floor_cells[i]
-                            if not c[3] then c[3] = 1 end
-                        end
-                    end
-                end
+                -- Nav-format cells are [cx, cy, wall_dist] -- the
+                -- server pre-computed the BFS so build_wall_dist
+                -- just transcribes them into the dist table.  No
+                -- in-place massaging needed; centerline.lua sniffs
+                -- the format from cells[1][3]'s type (number =
+                -- precomputed nav, boolean = legacy full).
                 return data.grid.floors
             end
         end
