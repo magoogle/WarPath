@@ -258,11 +258,11 @@ M.load = function (key)
         if content then
             local data, err = json.decode(content)
             if not data then
-                console.print('[StaticPather] parse error for ' .. key .. ': ' .. tostring(err))
+                console.print('[WarPath] parse error for ' .. key .. ': ' .. tostring(err))
                 -- Corrupt cache file -- fetch from server to replace it.
                 spawn_fetch(key)
             elseif data.schema_version ~= SCHEMA_SUPPORTED then
-                console.print('[StaticPather] unsupported schema_version=' ..
+                console.print('[WarPath] unsupported schema_version=' ..
                     tostring(data.schema_version) .. ' for ' .. key)
             else
                 result = { data = data, source_path = p }
@@ -321,22 +321,22 @@ local function spawn_fetch_all()
     -- into cache/.  See spawn_fetch() above for the same pattern.
     local cfg = uploader_cfg()
     if not cfg then
-        console.print('[StaticPather] bulk fetch skipped: no uploader config')
+        console.print('[WarPath] bulk fetch skipped: no uploader config')
         return
     end
     local queue_path = cfg.sidecar_dir and (cfg.sidecar_dir .. '\\fetch_queue.txt') or nil
     if not queue_path then
-        console.print('[StaticPather] bulk fetch skipped: no sidecar_dir')
+        console.print('[WarPath] bulk fetch skipped: no sidecar_dir')
         return
     end
     local f = io.open(queue_path, 'a')
     if not f then
-        console.print('[StaticPather] bulk fetch skipped: queue write failed')
+        console.print('[WarPath] bulk fetch skipped: queue write failed')
         return
     end
     f:write('refresh_all\n')
     f:close()
-    console.print('[StaticPather] bulk fetch queued for the uploader watcher')
+    console.print('[WarPath] bulk fetch queued for the uploader watcher')
     return
 end
 

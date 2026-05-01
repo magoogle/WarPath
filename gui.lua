@@ -1,11 +1,18 @@
 -- ---------------------------------------------------------------------------
--- StaticPather GUI -- toggle + live status panel showing whether the
+-- WarPath GUI -- toggle + live status panel showing whether the
 -- current zone has curated data loaded.
+--
+-- Naming history: this plugin was originally StaticPather; on rename
+-- to WarPath we kept `plugin_label = 'static_pather'` as the GUI-state
+-- hash seed so users' existing checkbox states (main toggle, debug
+-- mode, etc.) survive the rename.  Changing the label would invalidate
+-- those saved hashes and reset every toggle silently.  All user-
+-- facing strings now read "WarPath".
 -- ---------------------------------------------------------------------------
 
 local plugin_label   = 'static_pather'
-local plugin_version = '0.1'
-console.print('Lua Plugin - StaticPather v' .. plugin_version)
+local plugin_version = '0.2'
+console.print('Lua Plugin - WarPath v' .. plugin_version)
 
 local gui = {}
 
@@ -46,10 +53,11 @@ gui.demo_clear_pressed = false
 gui.travel_request     = nil   -- { kind = 'kind', value = 'pit_obelisk' } or { kind = 'skin', value = 'Blacksmith' }
 
 gui.render = function ()
-    if not gui.elements.main_tree:push('StaticPather v' .. plugin_version) then return end
+    if not gui.elements.main_tree:push('WarPath v' .. plugin_version) then return end
     gui.elements.main_toggle:render('Enable',
-        'Master toggle. While ON, exposes StaticPatherPlugin globally so ' ..
-        'other scripts can query precomputed walkability + paths instead ' ..
+        'Master toggle. While ON, exposes WarPathPlugin (alias: ' ..
+        'StaticPatherPlugin for backward compat) globally so other ' ..
+        'scripts can query precomputed walkability + paths instead ' ..
         'of going through Batmobile.')
     render_menu_header(gui.status_line)
 

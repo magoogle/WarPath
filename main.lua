@@ -97,7 +97,7 @@ local function demo_travel(req)
             gui.travel_line = gui.travel_line ..
                 ' [A* failed: ' .. tostring(stats and stats.reason or '?') .. ']'
         end
-        console.print('[StaticPather] ' .. gui.travel_line)
+        console.print('[WarPath] ' .. gui.travel_line)
         return
     end
 
@@ -114,7 +114,7 @@ local function demo_travel(req)
     visualizer.set_path(synthetic,
         target.skin .. '\n(teleport ' .. (plan.plan[1].name or '?') .. ', then walk)')
     console.print(string.format(
-        '[StaticPather] travel plan: %s -> teleport SNO=0x%X (%s) -> walk to (%.1f,%.1f)',
+        '[WarPath] travel plan: %s -> teleport SNO=0x%X (%s) -> walk to (%.1f,%.1f)',
         tostring(current_zone), plan.plan[1].sno, plan.plan[1].name,
         target.x, target.y))
     -- Print the full step list for transparency
@@ -164,7 +164,7 @@ local function demo_path_to_nearest_chest()
         'Path to %s @(%.1f,%.1f) -- %d waypoints, A* %dms',
         target.skin or '?', target.x, target.y, #path,
         math.floor((stats and stats.time_ms) or 0))
-    console.print('[StaticPather] ' .. gui.demo_line)
+    console.print('[WarPath] ' .. gui.demo_line)
 end
 
 local function main_pulse()
@@ -198,7 +198,7 @@ local function main_pulse()
     local zone = w and w.get_current_zone_name and w:get_current_zone_name() or nil
     if zone ~= last_zone then
         if last_zone and settings.debug_mode then
-            console.print('[StaticPather] zone change ' .. tostring(last_zone) ..
+            console.print('[WarPath] zone change ' .. tostring(last_zone) ..
                 ' -> ' .. tostring(zone))
         end
         last_zone = zone

@@ -80,7 +80,7 @@ local function ensure_loaded()
         loaded_at = (get_time_since_inject and get_time_since_inject()) or 0,
     }
     console.print(string.format(
-        '[StaticPather] loaded %s: cells=%d actors=%d centerline=%s (%s)',
+        '[WarPath] loaded %s: cells=%d actors=%d centerline=%s (%s)',
         key, cell_count, #state.actors,
         wall_dist and 'on' or 'off',
         result.data.saturated and 'SATURATED' or 'in-progress'))
