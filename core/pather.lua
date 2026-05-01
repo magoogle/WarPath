@@ -52,39 +52,62 @@ local function ensure_loaded()
         cell_count = cell_count + #f
     end
 
-    -- Build the wall-distance map for centerline path smoothing.
-    -- We flatten across all floors -- in practice the player is on
-    -- one floor at a time so cross-floor cells don't influence the
-    -- per-step penalty noticeably.  Cheap (linear in cell count)
-    -- and only runs on zone load.
-    local wall_dist = nil
-    local cell_res  = (result.data.grid and result.data.grid.resolution) or 0.5
-    if cell_count > 0 then
-        local flat = {}
-        for _, f in pairs(floors) do
-            for i = 1, #f do flat[#flat + 1] = f[i] end
-        end
-        wall_dist = centerline.build_wall_dist(flat)
-    end
+    -- Cell resolution + the floors table get stashed for the wall_dist
+    -- builder to consume on first smooth_path call.  Eager build here
+    -- was the source of multi-second hangs on zone change for big
+    -- overworld zones (Hawe_Verge: 616k cells -> seconds of pure-Lua
+    -- BFS on the game thread).  Most zone changes never trigger a
+    -- find_path, so most pay nothing.
+    local cell_res = (result.data.grid and result.data.grid.resolution) or 0.5
 
     state = {
-        key       = key,
-        key_type  = key_type,
-        ctx       = ctx,
-        data      = result.data,
-        path      = result.source_path,
-        actors    = result.data.actors or {},
-        cells     = cell_count,
-        wall_dist = wall_dist,
-        cell_res  = cell_res,
-        loaded_at = (get_time_since_inject and get_time_since_inject()) or 0,
+        key            = key,
+        key_type       = key_type,
+        ctx            = ctx,
+        data           = result.data,
+        path           = result.source_path,
+        actors         = result.data.actors or {},
+        cells          = cell_count,
+        wall_dist      = nil,             -- lazy: built on first smooth_path
+        wall_dist_tried = false,          -- set after first build attempt
+                                          -- so we don't retry on every call
+                                          -- when there's no walkable data
+        floors         = floors,          -- stashed for the lazy builder
+        cell_res       = cell_res,
+        loaded_at      = (get_time_since_inject and get_time_since_inject()) or 0,
     }
     console.print(string.format(
-        '[WarPath] loaded %s: cells=%d actors=%d centerline=%s (%s)',
+        '[WarPath] loaded %s: cells=%d actors=%d centerline=lazy (%s)',
         key, cell_count, #state.actors,
-        wall_dist and 'on' or 'off',
         result.data.saturated and 'SATURATED' or 'in-progress'))
     return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Build the wall-distance map for the currently-loaded state.  Called
+-- only when smooth_path actually needs it -- big zones (overworld
+-- 600k+ cells) take seconds to BFS in pure Lua, and most consumers
+-- never request smoothed paths, so pre-building at zone-load time
+-- was a multi-second hang for nothing.  Cached on first build so
+-- subsequent smooth_path calls don't pay again.
+local function ensure_wall_dist()
+    if not state then return false end
+    if state.wall_dist or state.wall_dist_tried then
+        return state.wall_dist ~= nil
+    end
+    state.wall_dist_tried = true
+    if (state.cells or 0) == 0 then return false end
+    local flat = {}
+    for _, f in pairs(state.floors or {}) do
+        for i = 1, #f do flat[#flat + 1] = f[i] end
+    end
+    local t0 = (get_time_since_inject and get_time_since_inject()) or 0
+    state.wall_dist = centerline.build_wall_dist(flat)
+    local elapsed = ((get_time_since_inject and get_time_since_inject()) or 0) - t0
+    console.print(string.format(
+        '[WarPath] centerline built for %s: %.2fs (%d cells)',
+        state.key, elapsed, state.cells))
+    return state.wall_dist ~= nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -144,14 +167,19 @@ end
 local function maybe_smooth(path, opts)
     if not path or #path < 3 then return path end
     if opts and opts.smooth == false then return path end
-    if not state or not state.wall_dist then return path end
+    if not state then return path end
+    -- Lazy wall_dist: built on first smoothing request rather than at
+    -- zone load.  Hides the BFS-cost behind an actual API user.
+    if not state.wall_dist then
+        if not ensure_wall_dist() then return path end
+    end
     return centerline.smooth_path(path, state.wall_dist, state.cell_res, 3)
 end
 
 M.find_path = function (start_pos, goal_pos, opts)
     if not goal_pos  then return nil, { reason = 'bad_input' } end
     if not start_pos then return nil, { reason = 'bad_input' } end
-    ensure_loaded()    -- populate state.wall_dist if not yet
+    ensure_loaded()    -- parse the cache JSON if not already
     local path, err = host_pather.path_to(goal_pos, start_pos)
     if not path then return nil, { reason = err or 'unreachable' } end
     path = maybe_smooth(path, opts)
