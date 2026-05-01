@@ -59,7 +59,26 @@ end
 local function get_plugin_root()
     local scripts = get_scripts_root()
     if not scripts then return nil end
-    return scripts .. '\\StaticPather'
+    -- Derive the actual plugin folder from package.path rather than
+    -- hardcoding it.  When the plugin was renamed StaticPather ->
+    -- WarPath, the prior hardcode pointed at a non-existent folder,
+    -- so the plugin's primary on-disk cache (cache/<key>.json) was
+    -- unreachable -- every zone load silently fell through to the
+    -- uploader's pulled_zones fallback, and zones missing from
+    -- pulled_zones (or with permission/IO issues there) reported
+    -- "no curated data" even when the cache had a fresh copy.
+    --
+    -- package.path under QQT is '<scripts>\<plugin>\?.lua;...';
+    -- extract '<scripts>\<plugin>' by stripping the '?.lua' suffix
+    -- from the first entry that begins with our scripts root.
+    -- Hardcoded 'WarPath' fallback in case package.path is unusual.
+    for entry in package.path:gmatch('[^;]+') do
+        local m = entry:match('^(.+)[/\\]%?%.lua$')
+        if m and m ~= '' and m:find(scripts, 1, true) == 1 then
+            return m
+        end
+    end
+    return scripts .. '\\WarPath'
 end
 
 local function plugin_cache_dir()
