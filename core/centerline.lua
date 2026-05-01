@@ -33,24 +33,40 @@ local ADJ = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} }
 --   dist: { ['cx,cy'] = distance }   -- only walkable cells; others omitted
 -- ---------------------------------------------------------------------------
 M.build_wall_dist = function (cells)
-    -- Two cell formats supported:
-    --   * Server-precomputed nav format: each cell is [cx, cy, dist].
-    --     The server's merger ran the BFS once when it emitted the
-    --     nav file; we just transcribe the values into the
-    --     "cx,cy" -> distance lookup table the rest of WarPath
-    --     consumes.  Free at the plugin level (a single pass over
-    --     the cell array), so big zones don't pay the 1.4-second
-    --     BFS hang on first smooth_path.
+    -- Three cell formats supported, in order of preference:
     --
-    --   * Legacy full format: each cell is [cx, cy, walkable_bool,
-    --     conf, total] -- no precomputed distance, falls through to
-    --     the in-Lua BFS below.  Used by older deploys / dev
-    --     sandboxes that don't have the nav variant on disk.
-    local n = #cells
+    --   1. Parallel arrays { cxs = {..}, cys = {..}, wds = {..} }
+    --      -- the latest nav-emit format from the server, ~50%
+    --      smaller than per-cell tuples.  Detected by `cells.cxs`
+    --      being a table.
+    --
+    --   2. Per-cell precomputed tuples [[cx, cy, dist], ...].  An
+    --      earlier nav format kept around for backward compat with
+    --      already-cached files.  Detected by cells[1][3] being a
+    --      number >= 1 (precomputed wall_dist).
+    --
+    --   3. Legacy full format [[cx, cy, walkable_bool, conf, total],
+    --      ...].  No precomputed distance -- falls through to the
+    --      in-Lua BFS below.  Used by older deploys / dev sandboxes.
+    --
+    -- All three converge on the same { "cx,cy" = N } return shape so
+    -- centerline.snap_waypoint and friends don't need to know.
+    if cells and type(cells.cxs) == 'table' then
+        -- Format 1: parallel arrays.
+        local cxs, cys, wds = cells.cxs, cells.cys, cells.wds
+        local n = #cxs
+        local dist = {}
+        for i = 1, n do
+            dist[cxs[i] .. ',' .. cys[i]] = wds[i]
+        end
+        return dist
+    end
+
+    local n = (type(cells) == 'table') and #cells or 0
     if n > 0 then
-        -- Sniff format from the first walkable cell.  In nav format
-        -- cells[i][3] is a numeric distance >= 1.  In full format
-        -- cells[i][3] is a boolean walkable flag.
+        -- Format 2: per-cell precomputed tuples.  Sniff cells[1][3]'s
+        -- type -- numeric = precomputed wall_dist, boolean = legacy
+        -- walkable flag (Format 3, BFS path below).
         local first = cells[1]
         if first and type(first[3]) == 'number' and first[3] >= 1 then
             local dist = {}

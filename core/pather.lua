@@ -44,13 +44,12 @@ local function ensure_loaded()
     local result = loader.load(key)
     if not result then return false end
 
-    -- Cell count for the status display.  Two paths:
-    --   1. Full file -- iterate floors[fid] and sum #cells (legacy /
-    --      old deploys with no .meta variant).
-    --   2. Meta file -- floors are stubs with no cells, but
-    --      floors_meta[fid].cell_count carries the count for the
-    --      status display.  Without this branch the meta path would
-    --      read cells=0 for every zone.
+    -- Cell count for the status display.  Three paths:
+    --   1. Meta file        -- cells_omitted=true, count via
+    --                          floors_meta[fid].cell_count
+    --   2. Nav (parallel)   -- floors[fid] = {cxs, cys, wds},
+    --                          count via #cxs
+    --   3. Full / nav-tuple -- floors[fid] = [...], count via #f
     local floors = (result.data.grid and result.data.grid.floors) or {}
     local cell_count = 0
     if result.data.cells_omitted then
@@ -60,7 +59,11 @@ local function ensure_loaded()
         end
     else
         for _, f in pairs(floors) do
-            cell_count = cell_count + #f
+            if type(f.cxs) == 'table' then
+                cell_count = cell_count + #f.cxs
+            else
+                cell_count = cell_count + #f
+            end
         end
     end
 
@@ -127,19 +130,48 @@ local function ensure_wall_dist()
         floors = pulled
         state.floors = pulled
         -- Recompute cells count from the freshly-loaded floors so the
-        -- status display lines up with reality.
+        -- status display lines up with reality.  Two cell shapes:
+        --   * parallel arrays {cxs, cys, wds} -- count via #cxs
+        --   * sequence arrays  [{cx, cy, ...}] -- count via #f
         local n = 0
-        for _, f in pairs(pulled) do n = n + #f end
+        for _, f in pairs(pulled) do
+            if type(f.cxs) == 'table' then n = n + #f.cxs
+            else                            n = n + #f end
+        end
         state.cells = n
     end
     if (state.cells or 0) == 0 then return false end
 
-    local flat = {}
-    for _, f in pairs(floors) do
-        for i = 1, #f do flat[#flat + 1] = f[i] end
+    -- Build wall_dist by merging all floors' cells into one input.
+    -- Parallel-array floors stay as {cxs, cys, wds} -- centerline.build_wall_dist
+    -- detects that shape directly; we only flatten when floors are
+    -- sequence-of-tuples so the function gets a uniform input.
+    local first_floor
+    for _, f in pairs(floors) do first_floor = f; break end
+
+    local input
+    if first_floor and type(first_floor.cxs) == 'table' then
+        -- Parallel-array path: concatenate per-floor cxs/cys/wds.
+        local cxs, cys, wds = {}, {}, {}
+        for _, f in pairs(floors) do
+            local fx, fy, fd = f.cxs, f.cys, f.wds
+            for i = 1, #fx do
+                cxs[#cxs + 1] = fx[i]
+                cys[#cys + 1] = fy[i]
+                wds[#wds + 1] = fd[i]
+            end
+        end
+        input = { cxs = cxs, cys = cys, wds = wds }
+    else
+        -- Sequence-of-tuples path (legacy + per-cell-precomputed).
+        input = {}
+        for _, f in pairs(floors) do
+            for i = 1, #f do input[#input + 1] = f[i] end
+        end
     end
+
     local t0 = (get_time_since_inject and get_time_since_inject()) or 0
-    state.wall_dist = centerline.build_wall_dist(flat)
+    state.wall_dist = centerline.build_wall_dist(input)
     local elapsed = ((get_time_since_inject and get_time_since_inject()) or 0) - t0
     console.print(string.format(
         '[WarPath] centerline built for %s: %.2fs (%d cells)',
