@@ -245,23 +245,43 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Lazy cells loader.  Used by core/pather.lua's ensure_wall_dist when
--- it actually needs the per-floor cell arrays.  Searches the same
--- candidate dirs as candidate_paths but ONLY looks for the FULL
--- (non-.meta) JSON file.  Returns the parsed grid.floors table or
--- nil when no full file exists locally.
+-- it actually needs the per-floor cell arrays.  Two acceptable
+-- on-disk formats, in preference order:
+--
+--   1. <key>.nav.json  -- navigation-only variant from the server's
+--                         merger.  Walkable cells only, encoded as
+--                         [cx, cy] (no walkable flag, no vote
+--                         metadata).  ~40-60% smaller than the full
+--                         file; loads faster.
+--   2. <key>.json      -- full-format file used by the viewer.
+--                         Each cell is [cx, cy, w, conf, total].
+--                         Older deploys / dev sandboxes may only
+--                         have this one.
+--
+-- Returns floors table normalized to the legacy 5-tuple form so
+-- centerline.build_wall_dist's `c[1], c[2], c[3]` reads keep
+-- working unchanged regardless of source.  For nav files the
+-- "walkable" bit is implicitly true on every cell -- we synthesize
+-- the third slot when normalizing.
 -- ---------------------------------------------------------------------------
-local function full_file_paths(key)
+local function nav_file_paths(key)
     local out = {}
     local own_dir = plugin_cache_dir()
-    if own_dir then out[#out + 1] = own_dir .. '\\' .. key .. '.json' end
+    if own_dir then
+        out[#out + 1] = own_dir .. '\\' .. key .. '.nav.json'
+        out[#out + 1] = own_dir .. '\\' .. key .. '.json'
+    end
     local cfg = uploader_cfg()
     if cfg and cfg.data_dir and cfg.data_dir ~= '' then
+        out[#out + 1] = cfg.data_dir .. '\\' .. key .. '.nav.json'
         out[#out + 1] = cfg.data_dir .. '\\' .. key .. '.json'
     end
     local scripts = get_scripts_root()
     if scripts then
         local repo = scripts:gsub('scripts$', '')
+        out[#out + 1] = repo .. 'WarMap\\data\\zones\\' .. key .. '.nav.json'
         out[#out + 1] = repo .. 'WarMap\\data\\zones\\' .. key .. '.json'
+        out[#out + 1] = scripts .. '\\WarMapData\\zones\\' .. key .. '.nav.json'
         out[#out + 1] = scripts .. '\\WarMapData\\zones\\' .. key .. '.json'
     end
     return out
@@ -269,11 +289,24 @@ end
 
 M.load_full_floors = function (key)
     if not key or key == '' then return nil end
-    for _, p in ipairs(full_file_paths(key)) do
+    for _, p in ipairs(nav_file_paths(key)) do
         local content = read_file(p)
         if content then
             local data, err = json.decode(content)
             if data and data.grid and data.grid.floors then
+                local is_nav = data.cells_format == 'nav_walkable_only'
+                if is_nav then
+                    -- Cells in nav format are [cx, cy].  Centerline
+                    -- expects 3-tuples ([cx, cy, walkable_bool]) so
+                    -- the c[3] check passes.  Synthesize the third
+                    -- slot in-place.
+                    for _, floor_cells in pairs(data.grid.floors) do
+                        for i = 1, #floor_cells do
+                            local c = floor_cells[i]
+                            if not c[3] then c[3] = 1 end
+                        end
+                    end
+                end
                 return data.grid.floors
             end
         end
